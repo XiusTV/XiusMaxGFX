@@ -169,17 +169,33 @@ end
 
 function NS.ApplyCVarBundle(bundle, skipMap)
     if not bundle then
-        return
+        return false
     end
+    local sliders = NS.SLIDER_CVARS
+    local wroteSlider = false
+    -- Pass 1: Write menu slider CVars (graphics* / raidGraphics*) first so their
+    -- engine callbacks run before raw beyond-the-slider CVars are applied.
+    if sliders then
+        for name, value in pairs(bundle) do
+            if sliders[name] and not (skipMap and skipMap[name]) then
+                if NS.SetCVarIfChanged(name, value) then
+                    wroteSlider = true
+                end
+            end
+        end
+    end
+    -- Pass 2: Write raw engine CVars (groundEffectDensity, farclip, wmoLodDist, etc.)
+    -- after the menu sliders so the slider callbacks cannot clobber them.
     for name, value in pairs(bundle) do
-        if not (skipMap and skipMap[name]) then
+        if not (sliders and sliders[name]) and not (skipMap and skipMap[name]) then
             NS.SetCVarIfChanged(name, value)
         end
     end
+    return wroteSlider
 end
 
 function NS.ApplyMenuGraphics(profile, skipFeatures)
-    NS.ApplyCVarBundle(NS.MENU_GRAPHICS[profile], skipFeatures and NS.FEATURE_CVARS or nil)
+    return NS.ApplyCVarBundle(NS.MENU_GRAPHICS[profile], skipFeatures and NS.FEATURE_CVARS or nil)
 end
 
 function NS.ApplyGraphicsQuality(profile)
@@ -295,33 +311,34 @@ function NS.ApplySparkleCVars()
         return
     end
     local bundle = (db.enabled and db.questItemSparkles) and OUTLINE_ON or OUTLINE_OFF
-    for name, value in pairs(bundle) do
-        NS.SetCVarIfChanged(name, value)
-    end
+    NS.ApplyCVarBundle(bundle)
     NS.SyncOutlineSuppressor()
 end
 
 function NS.ApplyFeature(def)
     if not def then
-        return
+        return false
     end
     if InCombat() then
         pendingApply = true
-        return
+        return false
     end
     local intensity = NS.GetFeatureIntensity(def.key)
     if intensity == "off" then
-        NS.ApplyCVarBundle(def.off)
-        return
+        return NS.ApplyCVarBundle(def.off)
     end
-    NS.ApplyCVarBundle(def[intensity] or def.ultimate)
+    return NS.ApplyCVarBundle(def[intensity] or def.ultimate)
 end
 
 function NS.ApplyAllFeatures()
     local list = NS.FEATURES
+    local wroteSlider = false
     for i = 1, #list do
-        NS.ApplyFeature(list[i])
+        if NS.ApplyFeature(list[i]) then
+            wroteSlider = true
+        end
     end
+    return wroteSlider
 end
 
 local function CancelReapplyTimer()
@@ -356,17 +373,23 @@ function NS.ApplyAll(full)
         db.baseProfile = base
     end
     local useFeatureBundles = (profile == "custom" or profile == "defaults")
-    -- Quality first. Writing it can reset menu rows a moment later, so a preset reapplies once.
-    local wroteQuality = false
+    -- Quality first. Writing it or menu sliders can reset raw CVars a moment later, so reapply.
+    local wroteMaster = false
     if profile ~= "custom" or full then
-        wroteQuality = NS.ApplyGraphicsQuality(base)
+        if NS.ApplyGraphicsQuality(base) then
+            wroteMaster = true
+        end
         -- Skip feature-owned CVars when ApplyAllFeatures is about to write their final values.
-        NS.ApplyMenuGraphics(base, useFeatureBundles)
+        if NS.ApplyMenuGraphics(base, useFeatureBundles) then
+            wroteMaster = true
+        end
     end
     -- Defaults still runs each feature's off bundle. Fog and sun shafts are on in
     -- the menu baseline and off only in those bundles. Projected textures stay on.
     if useFeatureBundles then
-        NS.ApplyAllFeatures()
+        if NS.ApplyAllFeatures() then
+            wroteMaster = true
+        end
     end
     NS.ApplySparkleCVars()
     NS.ApplySoftTargetCVars()
@@ -374,23 +397,23 @@ function NS.ApplyAll(full)
         NS.Sparkles.Refresh()
     end
     initialApplyDone = true
-    return wroteQuality
+    return wroteMaster
 end
 
 local reapplyLeft = 0
 
 local function ScheduleReapply()
-    reapplyLeft = 1
+    reapplyLeft = 2
     CancelReapplyTimer()
     if not (C_Timer and C_Timer.NewTimer) then
         return
     end
     local function Fire()
         reapplyTimer = nil
-        local wroteQuality = NS.ApplyAll(true)
-        if wroteQuality and reapplyLeft > 0 then
+        local wroteMaster = NS.ApplyAll(true)
+        if wroteMaster and reapplyLeft > 0 then
             reapplyLeft = reapplyLeft - 1
-            reapplyTimer = C_Timer.NewTimer(0.4, Fire)
+            reapplyTimer = C_Timer.NewTimer(0.35, Fire)
         else
             reapplyLeft = 0
         end
@@ -436,7 +459,14 @@ function NS.ApplySingleFeature(key)
         return
     end
     if NS.db and NS.db.enabled then
-        NS.ApplyFeature(feature)
+        if NS.ApplyFeature(feature) and C_Timer and C_Timer.After then
+            -- Re-assert raw CVars after the engine's slider callback settles.
+            C_Timer.After(0.2, function()
+                if NS.db and NS.db.enabled and not InCombat() then
+                    NS.ApplyFeature(feature)
+                end
+            end)
+        end
     end
     if NS.Options and NS.Options.Refresh then
         NS.Options.Refresh()
@@ -787,6 +817,7 @@ end
 local events = CreateFrame("Frame")
 SafeRegister(events, "ADDON_LOADED")
 SafeRegister(events, "PLAYER_LOGIN")
+SafeRegister(events, "PLAYER_ENTERING_WORLD")
 SafeRegister(events, "PLAYER_REGEN_ENABLED")
 
 function NS.SyncProtectWatch()
@@ -797,7 +828,7 @@ function NS.SyncProtectWatch()
     end
 end
 
-events:SetScript("OnEvent", function(_, event, arg1)
+events:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" then
         if not IsSecret(arg1) and arg1 == ADDON then
             NS.InitDB()
@@ -820,6 +851,13 @@ events:SetScript("OnEvent", function(_, event, arg1)
         end
         NS.CaptureReloadBaseline()
         NS.Print("Loaded v" .. NS.VERSION .. ". Type |cffffd100/xmg|r for options.")
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        local isInitialLogin = not IsSecret(arg1) and arg1
+        local isReloadingUi = not IsSecret(arg2) and arg2
+        if (isInitialLogin or isReloadingUi) and NS.db and NS.db.enabled then
+            NS.ApplyAll(true)
+            ScheduleReapply()
+        end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if pendingApply then
             pendingApply = false

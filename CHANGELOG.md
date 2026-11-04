@@ -10,3 +10,7 @@ All notable changes to Xius Max Graphics are documented in this file.
 - Pick-and-choose world, lighting, effects, and image upgrades past the normal graphics menu.
 - Quest loot sparkles, herb and ore glints, and optional quest-object sparkles.
 - Movable, resizable options window (`/xmg`) and the same controls under Esc > Options > AddOns.
+
+### Fixed
+- Graphics-menu sliders are written before the extra engine settings, so the game does not immediately undo view distance, grass, water, and detail.
+- Settings are applied again after login and after a UI reload.

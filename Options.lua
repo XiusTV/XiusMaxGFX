@@ -17,6 +17,7 @@ local LEFT = 16
 local refreshers = {}
 local layoutHooks = {}
 local panel
+local settingsPanel
 local scrollChild
 local blizzardChild
 local blizzardBuilt = false
@@ -492,6 +493,11 @@ function NS.Options.Refresh()
     if not NS.db or #refreshers == 0 then
         return
     end
+    local panelShown = panel and panel:IsShown()
+    local settingsShown = settingsPanel and settingsPanel:IsShown()
+    if not panelShown and not settingsShown then
+        return
+    end
     for i = 1, #refreshers do
         refreshers[i]()
     end
@@ -536,7 +542,7 @@ function NS.Options.RegisterSettings()
     if NS.settingsRegistered then
         return
     end
-    local settingsPanel = CreateFrame("Frame", "XiusMaxGraphicsSettingsPanel")
+    settingsPanel = CreateFrame("Frame", "XiusMaxGraphicsSettingsPanel")
     settingsPanel.name = "Xius Max Graphics"
     settingsPanel:Hide()
 

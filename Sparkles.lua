@@ -307,6 +307,7 @@ local function ReleaseHolder()
         pendingReparent = true
         return
     end
+    pcall(holder.ClearAllPoints, holder)
     pcall(holder.SetParent, holder, UIParent)
     pendingReparent = false
 end
