@@ -91,6 +91,9 @@ Window position and size are saved per account in `XiusMaxGraphicsDB`.
 **Xius XP & Reputation Tracker**: A compact HUD card that replaces the default XP and reputation bars with a single movable panel: level, XP, rested, watched faction, session rates, gold, and time-to-level.  
 [GitHub](https://github.com/XiusTV/XiusXPTracker) · [CurseForge](https://www.curseforge.com/wow/addons/xius-xp-and-reputation-tracker)
 
+**Xius Kill Streak**: A ten-tier kill streak announcer for mobs and enemy players. Each new tier shows a banner and plays a call, with a small counter for the current streak and the time left to keep it going.  
+[GitHub](https://github.com/XiusTV/XiusKillStreak)
+
 All Xius addons share the same clean, dark gold style for a unified UI.
 
 ## License
