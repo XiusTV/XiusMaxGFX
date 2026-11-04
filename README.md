@@ -2,13 +2,6 @@
 
 Pick-and-choose graphics upgrades for **World of Warcraft Forever (1.60.1)** and **modern retail**. Ultimate, Balance, and Defaults presets push view distance, grass, shadows, water, particles, and image clarity past the normal graphics menu, and you can turn each upgrade on or off by itself. Optional loot and gathering sparkles sit on top of that.
 
-**Folder name:** `XiusMaxGraphics`  
-**Interface:** `120105`, `16001`  
-**Commands:** `/xmg` · `/xiusmax`  
-**Version:** `1.6.7`
-
-Near-black panels, thin gold borders, and a movable options window match the rest of the Xius addons.
-
 ## Features
 
 ### Presets
