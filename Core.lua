@@ -5,6 +5,19 @@
 
 local ADDON, NS = ...
 
+local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
+    local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore and IsAddOnLoaded then
+    local ok, loaded = pcall(IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore then
+    return
+end
+
 local GetCVarFunc = (C_CVar and C_CVar.GetCVar) or GetCVar
 local SetCVarFunc = (C_CVar and C_CVar.SetCVar) or SetCVar
 local GetCVarInfoFunc = C_CVar and C_CVar.GetCVarInfo
@@ -19,14 +32,19 @@ local initialApplyDone = false
 local reapplyTimer
 local reloadPending = false
 local reloadAsked
-local outlineSuppressor
-local outlineAccum = 0
-local OUTLINE_STEP = 0.5
+local OUTLINE_FAST = 0.5
+local OUTLINE_SLOW = 3
 local applyingProtect = false
 local missingCVars = {}
 local unwritableOutline = {}
 
 local function IsSecret(value)
+    if value == nil then
+        return false
+    end
+    if NS.CanRead then
+        return not NS.CanRead(value)
+    end
     return issecretvalue ~= nil and issecretvalue(value)
 end
 
@@ -84,13 +102,16 @@ local INTENSITY_ORDER = { "off", "balance", "ultimate" }
 
 local function CVarGet(name)
     if not GetCVarFunc or missingCVars[name] then
-        return nil
+        return nil, "missing"
     end
     local ok, value = pcall(GetCVarFunc, name)
-    if ok then
-        return value
+    if not ok or value == nil then
+        return nil, "missing"
     end
-    return nil
+    if IsSecret(value) then
+        return nil, "secret"
+    end
+    return value, "ok"
 end
 
 local function CVarExists(name)
@@ -104,8 +125,8 @@ local function CVarExists(name)
         end
         return defaultValue ~= nil or value ~= nil
     end
-    local current = CVarGet(name)
-    return current ~= nil and not IsSecret(current)
+    local _, status = CVarGet(name)
+    return status == "ok" or status == "secret"
 end
 
 local function CVarSet(name, value)
@@ -125,12 +146,18 @@ local function CVarSet(name, value)
 end
 
 local function ValuesMatch(a, b)
-    if IsSecret(a) or IsSecret(b) or a == nil then
+    if IsSecret(a) or IsSecret(b) or a == nil or b == nil then
         return false
     end
     local na, nb = tonumber(a), tonumber(b)
+    if IsSecret(na) or IsSecret(nb) then
+        return false
+    end
     if na and nb then
         local delta = na - nb
+        if IsSecret(delta) then
+            return false
+        end
         if delta < 0 then
             delta = -delta
         end
@@ -140,12 +167,21 @@ local function ValuesMatch(a, b)
 end
 
 function NS.SetCVarIfChanged(name, value)
-    if value == nil or missingCVars[name] then
+    if value == nil or IsSecret(value) or missingCVars[name] then
         return false
     end
-    local current = CVarGet(name)
-    if current == nil then
-        if not InCombat() and not CVarExists(name) then
+    local current, status = CVarGet(name)
+    if InCombat() then
+        if status ~= "ok" or not ValuesMatch(current, value) then
+            pendingApply = true
+        end
+        return false
+    end
+    if status == "secret" then
+        return CVarSet(name, value)
+    end
+    if status ~= "ok" then
+        if not CVarExists(name) then
             missingCVars[name] = true
         end
         return false
@@ -157,38 +193,61 @@ function NS.SetCVarIfChanged(name, value)
 end
 
 function NS.ForceCVarNow(name, value)
-    if value == nil or missingCVars[name] then
+    if value == nil or IsSecret(value) or missingCVars[name] then
         return false
     end
-    if CVarGet(name) == nil and not InCombat() and not CVarExists(name) then
+    if InCombat() then
+        pendingApply = true
+        return false
+    end
+    local _, status = CVarGet(name)
+    if status == "missing" and not CVarExists(name) then
         missingCVars[name] = true
         return false
     end
     return CVarSet(name, value)
 end
 
+local bundlePlan = {}
+
+local function BundlePlan(bundle)
+    local plan = bundlePlan[bundle]
+    if plan then
+        return plan
+    end
+    local sliders, raw = {}, {}
+    local sliderSet = NS.SLIDER_CVARS
+    for name in pairs(bundle) do
+        if sliderSet and sliderSet[name] then
+            sliders[#sliders + 1] = name
+        else
+            raw[#raw + 1] = name
+        end
+    end
+    plan = { sliders, raw }
+    bundlePlan[bundle] = plan
+    return plan
+end
+
 function NS.ApplyCVarBundle(bundle, skipMap)
     if not bundle then
         return false
     end
-    local sliders = NS.SLIDER_CVARS
+    -- Pass 1 writes menu slider CVars so their engine callbacks run before
+    -- pass 2 writes the raw CVars those callbacks would otherwise reset.
+    local plan = BundlePlan(bundle)
+    local sliderNames, rawNames = plan[1], plan[2]
     local wroteSlider = false
-    -- Pass 1: Write menu slider CVars (graphics* / raidGraphics*) first so their
-    -- engine callbacks run before raw beyond-the-slider CVars are applied.
-    if sliders then
-        for name, value in pairs(bundle) do
-            if sliders[name] and not (skipMap and skipMap[name]) then
-                if NS.SetCVarIfChanged(name, value) then
-                    wroteSlider = true
-                end
-            end
+    for i = 1, #sliderNames do
+        local name = sliderNames[i]
+        if not (skipMap and skipMap[name]) and NS.SetCVarIfChanged(name, bundle[name]) then
+            wroteSlider = true
         end
     end
-    -- Pass 2: Write raw engine CVars (groundEffectDensity, farclip, wmoLodDist, etc.)
-    -- after the menu sliders so the slider callbacks cannot clobber them.
-    for name, value in pairs(bundle) do
-        if not (sliders and sliders[name]) and not (skipMap and skipMap[name]) then
-            NS.SetCVarIfChanged(name, value)
+    for i = 1, #rawNames do
+        local name = rawNames[i]
+        if not (skipMap and skipMap[name]) then
+            NS.SetCVarIfChanged(name, bundle[name])
         end
     end
     return wroteSlider
@@ -204,16 +263,12 @@ function NS.ApplyGraphicsQuality(profile)
         return false
     end
     local wrote = false
-    local function WriteQuality(name)
-        if missingCVars[name] or ValuesMatch(CVarGet(name), quality) then
-            return
-        end
-        if NS.ForceCVarNow(name, quality) then
-            wrote = true
-        end
+    if NS.SetCVarIfChanged("graphicsQuality", quality) then
+        wrote = true
     end
-    WriteQuality("graphicsQuality")
-    WriteQuality("RAIDgraphicsQuality")
+    if NS.SetCVarIfChanged("RAIDgraphicsQuality", quality) then
+        wrote = true
+    end
     return wrote
 end
 
@@ -232,14 +287,15 @@ end
 
 function NS.ApplySoftTargetCVars()
     local db = NS.db
-    if not db or not db.enabled then
+    if not db then
         return
     end
     if InCombat() then
         pendingApply = true
         return
     end
-    if db.herbSparkles or db.oreSparkles or db.questObjectSparkles then
+    local want = db.enabled and (db.herbSparkles or db.oreSparkles or db.questObjectSparkles)
+    if want then
         -- In front of the camera only, gather range. A wide arc was locking onto quest givers.
         local range = db.questObjectSparkles and 28 or 20
         local arc = db.questObjectSparkles and 2 or 1
@@ -247,8 +303,16 @@ function NS.ApplySoftTargetCVars()
         NS.SetCVarIfChanged("SoftTargetInteractRange", range)
         NS.SetCVarIfChanged("SoftTargetInteractArc", arc)
         NS.SetCVarIfChanged("SoftTargetInteractOnlyInRange", 1)
+    else
+        -- Mode 3 is this addon's gather targeting. Put it back when sparkles are off.
+        local current, status = CVarGet("SoftTargetInteract")
+        if status == "ok" and ValuesMatch(current, 3) then
+            NS.SetCVarIfChanged("SoftTargetInteract", 1)
+        end
     end
-    NS.ApplySoftTargetIcons()
+    if db.enabled then
+        NS.ApplySoftTargetIcons()
+    end
 end
 
 function NS.ApplyGathering()
@@ -258,45 +322,94 @@ function NS.ApplyGathering()
     end
 end
 
+local outlineTicker
+local outlineStep = 0
+local outlineQuiet = 0
+local outlineNames = {}
+for name in pairs(OUTLINE_OFF) do
+    outlineNames[#outlineNames + 1] = name
+end
+
+local function StopOutlineTicker()
+    if outlineTicker then
+        outlineTicker:Cancel()
+        outlineTicker = nil
+    end
+    outlineStep = 0
+end
+
+local function StartOutlineTicker(step)
+    if outlineTicker and outlineStep == step then
+        return
+    end
+    StopOutlineTicker()
+    if not (C_Timer and C_Timer.NewTicker) then
+        return
+    end
+    outlineStep = step
+    outlineTicker = C_Timer.NewTicker(step, function()
+        NS.PulseOutline()
+    end)
+end
+
+function NS.PulseOutline()
+    if InCombat() then
+        return
+    end
+    local busy = false
+    for i = 1, #outlineNames do
+        local name = outlineNames[i]
+        if not missingCVars[name] and not unwritableOutline[name] then
+            local value = OUTLINE_OFF[name]
+            local live, status = CVarGet(name)
+            if status == "secret" then
+                -- Leave this CVar alone until its value can be read.
+            elseif status ~= "ok" then
+                if not CVarExists(name) then
+                    missingCVars[name] = true
+                else
+                    unwritableOutline[name] = true
+                end
+            elseif not ValuesMatch(live, value) then
+                busy = true
+                if not CVarSet(name, value) then
+                    unwritableOutline[name] = true
+                else
+                    local after, afterStatus = CVarGet(name)
+                    if afterStatus == "ok" and not ValuesMatch(after, value) then
+                        unwritableOutline[name] = true
+                    end
+                end
+            end
+        end
+    end
+    if not outlineTicker then
+        return
+    end
+    if busy then
+        outlineQuiet = 0
+        if outlineStep ~= OUTLINE_FAST then
+            StartOutlineTicker(OUTLINE_FAST)
+        end
+    else
+        outlineQuiet = outlineQuiet + 1
+        if outlineQuiet >= 4 and outlineStep ~= OUTLINE_SLOW then
+            StartOutlineTicker(OUTLINE_SLOW)
+        end
+    end
+end
+
 function NS.SyncOutlineSuppressor()
     local db = NS.db
     -- Graphics quality turns outline mode off, and disabled outline mode is the
     -- quest-giver sparkle. Hold High outline mode and the loot-sparkle flag off.
     local want = db and db.enabled and not db.questItemSparkles
     if want then
-        if not outlineSuppressor then
-            outlineSuppressor = CreateFrame("Frame")
-            outlineSuppressor:SetScript("OnUpdate", function(_, elapsed)
-                outlineAccum = outlineAccum + elapsed
-                if outlineAccum < OUTLINE_STEP then
-                    return
-                end
-                outlineAccum = 0
-                if InCombat() then
-                    return
-                end
-                for name, value in pairs(OUTLINE_OFF) do
-                    if not missingCVars[name] and not unwritableOutline[name] then
-                        local live = CVarGet(name)
-                        if live == nil then
-                            if not CVarExists(name) then
-                                missingCVars[name] = true
-                            else
-                                unwritableOutline[name] = true
-                            end
-                        elseif not IsSecret(live) and not ValuesMatch(live, value) then
-                            if not CVarSet(name, value) or not ValuesMatch(CVarGet(name), value) then
-                                unwritableOutline[name] = true
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-        outlineAccum = 0
-        outlineSuppressor:Show()
-    elseif outlineSuppressor then
-        outlineSuppressor:Hide()
+        outlineQuiet = 0
+        StartOutlineTicker(OUTLINE_FAST)
+        NS.PulseOutline()
+    else
+        StopOutlineTicker()
     end
 end
 
@@ -353,6 +466,7 @@ function NS.ApplyAll(full)
     if not db or not db.enabled then
         CancelReapplyTimer()
         NS.SyncOutlineSuppressor()
+        NS.ApplySoftTargetCVars()
         if NS.Sparkles and NS.Sparkles.Refresh then
             NS.Sparkles.Refresh()
         end
@@ -763,7 +877,12 @@ SlashCmdList.XIUSMAXGRAPHICS = function(msg)
     elseif msg == "sparkles" or msg == "loot" then
         NS.ToggleFeature("questItemSparkles", not NS.db.questItemSparkles)
     else
-        NS.ToggleOptions()
+        local Lib = _G.XiusCoreSettingsLib
+        if Lib and type(Lib.Toggle) == "function" then
+            Lib:Toggle("Graphics")
+        elseif NS.ToggleOptions then
+            NS.ToggleOptions()
+        end
     end
 end
 
@@ -790,7 +909,11 @@ function XiusMaxGraphics_OnAddonCompartmentClick(_, buttonName)
         end
         return
     end
-    NS.ToggleOptions()
+    if NS.OpenGraphicsOptions then
+        NS.OpenGraphicsOptions()
+    else
+        NS.ToggleOptions()
+    end
 end
 
 function XiusMaxGraphics_OnAddonCompartmentEnter(_, menuButtonFrame)
@@ -839,13 +962,6 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             NS.InitDB()
         end
         NS.SyncProtectWatch()
-        if NS.db and NS.db.enabled then
-            if NS.ApplyAll(true) then
-                ScheduleReapply()
-            end
-        else
-            NS.SyncOutlineSuppressor()
-        end
         if NS.Options and NS.Options.RegisterSettings then
             NS.Options.RegisterSettings()
         end
@@ -854,9 +970,10 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
     elseif event == "PLAYER_ENTERING_WORLD" then
         local isInitialLogin = not IsSecret(arg1) and arg1
         local isReloadingUi = not IsSecret(arg2) and arg2
-        if (isInitialLogin or isReloadingUi) and NS.db and NS.db.enabled then
-            NS.ApplyAll(true)
-            ScheduleReapply()
+        if (isInitialLogin or isReloadingUi) and NS.db then
+            if NS.ApplyAll(true) then
+                ScheduleReapply()
+            end
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if pendingApply then

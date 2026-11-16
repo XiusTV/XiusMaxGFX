@@ -5,7 +5,33 @@
 
 local ADDON, NS = ...
 
-NS.VERSION = "1.6.7"
+local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
+    local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore and IsAddOnLoaded then
+    local ok, loaded = pcall(IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore then
+    return
+end
+
+NS.VERSION = "1.6.8"
+
+function NS.CanRead(value)
+    if value == nil then
+        return false
+    end
+    if issecretvalue and issecretvalue(value) then
+        return false
+    end
+    if canaccessvalue and not canaccessvalue(value) then
+        return false
+    end
+    return true
+end
 
 -- graphicsQuality CVar is 0-9; Options slider shows CVar+1 (1-10).
 NS.PROFILE_QUALITY_UI = {
@@ -333,8 +359,6 @@ NS.MENU_GRAPHICS = {
     },
 }
 
-NS.FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
-NS.WHITE = "Interface\\Buttons\\WHITE8X8"
 NS.COLOR = {
     gold = { 1, 0.847, 0, 1 },
     goldLine = { 0.72, 0.57, 0, 1 },
@@ -346,14 +370,6 @@ NS.COLOR = {
     warn = { 1, 0.55, 0.20, 1 },
     sparkle = { 1.0, 0.88, 0.35, 1 },
 }
-NS.BACKDROP_MENU = {
-    bgFile = NS.WHITE,
-    edgeFile = NS.WHITE,
-    tile = false,
-    edgeSize = 1,
-    insets = { left = 1, right = 1, top = 1, bottom = 1 },
-}
-NS.BACKDROP_TEMPLATE = BackdropTemplateMixin and "BackdropTemplate" or nil
 
 NS.FEATURES = {
     {
@@ -696,9 +712,6 @@ NS.DEFAULTS = {
     protect = false,
     profile = "ultimate",
     baseProfile = "ultimate",
-    panelPoint = { "CENTER", "CENTER", 0, 40 },
-    panelWidth = 440,
-    panelHeight = 560,
     intensity = {},
     questItemSparkles = true,
     herbSparkles = true,
@@ -767,9 +780,6 @@ function NS.InitDB()
         db.projectedTextures = true
         db.intensity.projectedTextures = "ultimate"
     end
-    if type(db.panelPoint) ~= "table" or type(db.panelPoint[1]) ~= "string" or type(db.panelPoint[2]) ~= "string" then
-        db.panelPoint = { "CENTER", "CENTER", 0, 40 }
-    end
     db.enabled = db.enabled ~= false
     db.protect = db.protect and true or false
     db.questItemSparkles = db.questItemSparkles ~= false
@@ -780,40 +790,6 @@ function NS.InitDB()
     db.showSoftTargetInteractIcons = db.showSoftTargetInteractIcons and true or false
     db.chatMessages = db.chatMessages ~= false
     NS.db = db
-end
-
-function NS.SetFont(fs, size, flags)
-    fs:SetFont(NS.FONT, size or 12, flags or "")
-end
-
-function NS.ApplyBackdrop(frame, backdrop, bgColor, edgeColor)
-    if not frame.SetBackdrop then
-        return
-    end
-    frame:SetBackdrop(backdrop or NS.BACKDROP_MENU)
-    if bgColor then
-        frame:SetBackdropColor(bgColor[1], bgColor[2], bgColor[3], bgColor[4] or 1)
-    end
-    if edgeColor then
-        frame:SetBackdropBorderColor(edgeColor[1], edgeColor[2], edgeColor[3], edgeColor[4] or 1)
-    end
-end
-
-function NS.CreateWindowBackground(frame)
-    NS.ApplyBackdrop(frame, NS.BACKDROP_MENU, { 0.05, 0.05, 0.05, 0.96 }, {
-        NS.COLOR.buttonEdge[1], NS.COLOR.buttonEdge[2], NS.COLOR.buttonEdge[3], 0.9,
-    })
-end
-
-function NS.CreateTitleBar(parent, height)
-    local bar = CreateFrame("Frame", nil, parent, NS.BACKDROP_TEMPLATE)
-    bar:SetPoint("TOPLEFT", parent, "TOPLEFT", 1, -1)
-    bar:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -1, -1)
-    bar:SetHeight(height or 26)
-    NS.ApplyBackdrop(bar, NS.BACKDROP_MENU, { 0.10, 0.09, 0.06, 1 }, {
-        NS.COLOR.goldLineDim[1], NS.COLOR.goldLineDim[2], NS.COLOR.goldLineDim[3], 1,
-    })
-    return bar
 end
 
 function NS.Print(msg)

@@ -1,17 +1,25 @@
-## Interface: 120105, 16001
+## Interface: 120105, 120107, 16001
 ## Title: Xius Max Graphics
 ## Notes: Pick-and-choose graphics upgrades and loot sparkles for modern and Forever. Type /xmg
 ## Author: Xius
-## Version: 1.6.7
+## Version: 1.6.8
 ## SavedVariables: XiusMaxGraphicsDB
+## LoadSavedVariablesFirst: 1
 ## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
 ## X-Website: https://github.com/XiusTV/xiusmaxgfx
 ## AddonCompartmentFunc: XiusMaxGraphics_OnAddonCompartmentClick
 ## AddonCompartmentFuncOnEnter: XiusMaxGraphics_OnAddonCompartmentEnter
 ## AddonCompartmentFuncOnLeave: XiusMaxGraphics_OnAddonCompartmentLeave
+## Category: User Interface
+## Group: XiusCore
+## Dependencies: XiusCore
+## RequiredDeps: XiusCore
+## X-Part-Of: XiusCore
 ## AllowLoadGameType: standard, forever
 
 Config.lua
 Core.lua
 Options.lua
 Sparkles.lua
+Shell.lua
+Libs/SettingsGlue.lua

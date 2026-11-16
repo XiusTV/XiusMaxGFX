@@ -5,6 +5,19 @@
 
 local ADDON, NS = ...
 
+local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
+    local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore and IsAddOnLoaded then
+    local ok, loaded = pcall(IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore then
+    return
+end
+
 NS.Sparkles = NS.Sparkles or {}
 
 local sparkles = NS.Sparkles
@@ -43,7 +56,7 @@ local raisedNameplate = false
 local eventsRegistered = false
 
 local ORE_WORDS = {
-    "ore", "vein", "deposit", "seam", "outcrop",
+    "vein", "deposit", "seam", "outcrop",
     "copper", "tin", "silver", "iron", "gold", "mithril", "truesilver", "thorium",
     "cobalt", "saronite", "titanium", "obsidium", "elementium", "pyrite",
     "kyparite", "trillium", "leystone", "felslate", "empyrium", "monelite",
@@ -52,16 +65,22 @@ local ORE_WORDS = {
 }
 
 local HERB_WORDS = {
-    "herb", "bloom", "lotus", "leaf", "weed", "moss", "root", "flower",
-    "thorn", "thistle", "mushroom", "sage", "grass", "kelp", "lily", "rose",
-    "poppy", "lichen", "clover", "nettle", "vine", "blossom", "foil", "sansam",
-    "icecap", "arthas", "whisker", "wintersbite", "gromsblood", "stranglekelp",
-    "mageroyal", "kingsblood", "sungrass", "dreamfoil", "plaguebloom",
-    "hochenblume", "saxifrage", "writhebark", "mycobloom", "luredrop", "orbinid",
-    "arathor",
+    "peacebloom", "silverleaf", "earthroot", "mageroyal", "briarthorn", "stranglekelp",
+    "bruiseweed", "steelbloom", "gravemoss", "kingsblood", "liferoot", "fadeleaf",
+    "goldthorn", "wintersbite", "firebloom", "lotus", "arthas", "sungrass",
+    "blindweed", "mushroom", "gromsblood", "sansam", "dreamfoil", "silversage",
+    "plaguebloom", "icecap", "whisker", "felweed", "ragveil", "terocone",
+    "netherbloom", "flamecap", "bloodthistle", "hochenblume", "saxifrage",
+    "writhebark", "mycobloom", "luredrop", "orbinid", "arathor",
 }
 
 local function IsSecret(value)
+    if value == nil then
+        return false
+    end
+    if NS.CanRead then
+        return not NS.CanRead(value)
+    end
     return issecretvalue ~= nil and issecretvalue(value)
 end
 
@@ -114,30 +133,55 @@ local function HasAny(text, list)
         return false
     end
     for i = 1, #list do
-        if strfind(text, list[i], 1, true) ~= nil then
-            return true
+        local word = list[i]
+        local start = 1
+        local step = #word
+        while true do
+            local found = strfind(text, word, start, true)
+            if not found then
+                break
+            end
+            local prev = found > 1 and strsub(text, found - 1, found - 1) or ""
+            local prevOk = prev == "" or strfind(prev, "%a") == nil
+            if prevOk then
+                local nextc = strsub(text, found + step, found + step)
+                local nextOk = nextc == "" or strfind(nextc, "%a") == nil
+                -- Short names must be a whole word so "gold" does not match "golden".
+                if nextOk or step >= 6 then
+                    return true
+                end
+            end
+            start = found + 1
         end
     end
     return false
 end
 
+local tipParts = {}
+
 local function ReadTooltipLines(data)
     local lines = data.lines
-    if type(lines) ~= "table" or IsSecret(lines) or IsSecretTable(lines) then
+    if IsSecret(lines) or IsSecretTable(lines) or type(lines) ~= "table" then
         return nil
     end
-    local text
+    local count = 0
     for i = 1, #lines do
         local line = lines[i]
-        if line and not IsSecret(line) and not IsSecretTable(line) then
+        if not IsSecret(line) and not IsSecretTable(line) and line then
             local left = line.leftText
-            if type(left) == "string" and left ~= "" and not IsSecret(left) then
-                local lower = strlower(left)
-                text = text and (text .. " " .. lower) or lower
+            if not IsSecret(left) and type(left) == "string" and left ~= "" then
+                count = count + 1
+                tipParts[count] = strlower(left)
             end
         end
     end
-    return text
+    for i = count + 1, #tipParts do
+        tipParts[i] = nil
+    end
+    if count == 0 then
+        return nil
+    end
+    return table.concat(tipParts, " ")
 end
 
 local function TooltipText(unit)
@@ -262,22 +306,31 @@ local function EnsureHolder()
         g.speed = 1.4 + i * 0.25
         glints[i] = g
     end
+end
 
-    holder:SetScript("OnUpdate", function(self, elapsed)
-        accum = accum + elapsed
-        if accum < STEP then
+local function GlintOnUpdate(self, elapsed)
+    if IsSecret(elapsed) then
+        return
+    end
+    accum = accum + (elapsed or 0)
+    if accum < STEP then
+        return
+    end
+    accum = 0
+    local t = GetTime()
+    if IsSecret(t) then
+        return
+    end
+    for i = 1, NUM_GLINTS do
+        local g = glints[i]
+        local angle = g.angle + t * g.speed
+        local pulse = 0.7 + 0.3 * sin(t * 6 + g.angle)
+        if IsSecret(angle) or IsSecret(pulse) then
             return
         end
-        accum = 0
-        local t = GetTime()
-        for i = 1, NUM_GLINTS do
-            local g = glints[i]
-            local angle = g.angle + t * g.speed
-            local pulse = 0.7 + 0.3 * sin(t * 6 + g.angle)
-            g:SetPoint("CENTER", self, "CENTER", cos(angle) * g.radius, sin(angle) * g.radius * pulse)
-            g:SetAlpha(0.4 + 0.6 * pulse)
-        end
-    end)
+        g:SetPoint("CENTER", self, "CENTER", cos(angle) * g.radius, sin(angle) * g.radius * pulse)
+        g:SetAlpha(0.4 + 0.6 * pulse)
+    end
 end
 
 local function SetColor(mode)
@@ -302,11 +355,12 @@ local function ReleaseHolder()
     if not holder then
         return
     end
-    holder:Hide()
+    holder:SetScript("OnUpdate", nil)
     if InCombat() then
         pendingReparent = true
         return
     end
+    holder:Hide()
     pcall(holder.ClearAllPoints, holder)
     pcall(holder.SetParent, holder, UIParent)
     pendingReparent = false
@@ -385,6 +439,9 @@ local function Show()
         SetColor(InRange() and 1 or 2)
     else
         SetColor(0)
+    end
+    if holder:GetScript("OnUpdate") ~= GlintOnUpdate then
+        holder:SetScript("OnUpdate", GlintOnUpdate)
     end
     holder:Show()
 end
@@ -501,12 +558,12 @@ events:SetScript("OnEvent", function(_, event, arg1)
         Hide()
         return
     elseif event == "NAME_PLATE_UNIT_ADDED" then
-        if lastGuid ~= nil and not lastAllowed then
+        if not lastAllowed then
             return
         end
-        if shown and attachedPlate and UnitIsUnit and type(arg1) == "string" and not IsSecret(arg1) then
+        if UnitIsUnit and not IsSecret(arg1) and type(arg1) == "string" then
             local ok, same = pcall(UnitIsUnit, arg1, "softinteract")
-            if ok and not IsSecret(same) and not same then
+            if not (ok and not IsSecret(same) and same) then
                 return
             end
         end
