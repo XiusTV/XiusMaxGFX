@@ -1,8 +1,8 @@
-## Interface: 120105, 120107, 16001
-## Title: Xius Max Graphics
+## Interface: 120100, 120105, 120107, 16001
+## Title: |cffd4a85aXius|r |cff5fd3f0Max Graphics|r
 ## Notes: Pick-and-choose graphics upgrades and loot sparkles for modern and Forever. Type /xmg
 ## Author: Xius
-## Version: 1.6.8
+## Version: 1.7.0
 ## SavedVariables: XiusMaxGraphicsDB
 ## LoadSavedVariablesFirst: 1
 ## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
@@ -15,11 +15,9 @@
 ## Dependencies: XiusCore
 ## RequiredDeps: XiusCore
 ## X-Part-Of: XiusCore
-## AllowLoadGameType: standard, forever
+## AllowLoadGameType: standard, forever, camelot
 
 Config.lua
 Core.lua
-Options.lua
 Sparkles.lua
-Shell.lua
 Libs/SettingsGlue.lua

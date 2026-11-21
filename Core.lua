@@ -1,11 +1,7 @@
---[[
-    Xius Max Graphics - Core.lua
-    Applies graphics presets and pick-and-choose CVars.
-]]
+local addonName, ns = ...
+local ADDON, NS = addonName, ns
 
-local ADDON, NS = ...
-
-local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+local XiusCore = _G.XiusCore or _G.XiusCoreSettingsLib
 if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
     local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
     XiusCore = ok and loaded and true or false
@@ -30,13 +26,15 @@ local pcall = pcall
 local pendingApply = false
 local initialApplyDone = false
 local reapplyTimer
+local settleTimer
 local reloadPending = false
 local reloadAsked
 local OUTLINE_FAST = 0.5
-local OUTLINE_SLOW = 3
+local LOGIN_SETTLE_SECONDS = 4.35
 local applyingProtect = false
 local missingCVars = {}
 local unwritableOutline = {}
+local rejectedMaxCVars = {}
 
 local function IsSecret(value)
     if value == nil then
@@ -45,11 +43,30 @@ local function IsSecret(value)
     if NS.CanRead then
         return not NS.CanRead(value)
     end
-    return issecretvalue ~= nil and issecretvalue(value)
+    if issecretvalue then
+        local ok, secret = pcall(issecretvalue, value)
+        if not ok or secret then
+            return true
+        end
+    end
+    if canaccessvalue then
+        local ok, allowed = pcall(canaccessvalue, value)
+        if not ok or not allowed then
+            return true
+        end
+    end
+    return false
 end
 
 local function InCombat()
-    return InCombatLockdown ~= nil and InCombatLockdown()
+    if type(InCombatLockdown) ~= "function" then
+        return false
+    end
+    local ok, locked = pcall(InCombatLockdown)
+    if not ok or IsSecret(locked) then
+        return true
+    end
+    return locked and true or false
 end
 
 local function SafeRegister(frame, event)
@@ -83,22 +100,22 @@ local OUTLINE_OFF = {
     ShowQuestObjectHighlightEffect = 0,
 }
 
+local OUTLINE_WATCH = {}
+for k in pairs(OUTLINE_OFF) do
+    OUTLINE_WATCH[k] = true
+    OUTLINE_WATCH[string.lower(k)] = true
+end
+
 local PROTECT_WATCH = {
-    graphicsOutlineMode = true,
-    OutlineEngineMode = true,
-    outlineModeShowLootEffectWhenDisabled = true,
-    raidGraphicsOutlineMode = true,
-    RAIDOutlineEngineMode = true,
-    Outline = true,
-    ShowQuestObjectHighlightEffect = true,
     SoftTargetIconGameObject = true,
     SoftTargetIconInteract = true,
 }
+for k in pairs(OUTLINE_WATCH) do
+    PROTECT_WATCH[k] = true
+end
 for k in pairs(PROTECT_WATCH) do
     PROTECT_WATCH[string.lower(k)] = true
 end
-
-local INTENSITY_ORDER = { "off", "balance", "ultimate" }
 
 local function CVarGet(name)
     if not GetCVarFunc or missingCVars[name] then
@@ -120,7 +137,10 @@ local function CVarExists(name)
     end
     if GetCVarInfoFunc then
         local ok, value, defaultValue = pcall(GetCVarInfoFunc, name)
-        if not ok or IsSecret(value) or IsSecret(defaultValue) then
+        if not ok then
+            return false
+        end
+        if IsSecret(value) or IsSecret(defaultValue) then
             return true
         end
         return defaultValue ~= nil or value ~= nil
@@ -166,10 +186,22 @@ local function ValuesMatch(a, b)
     return tostring(a) == tostring(b)
 end
 
+local function ResolveTargetValue(name, value)
+    local fallback = NS.FALLBACK_CVARS and NS.FALLBACK_CVARS[name]
+    if fallback ~= nil and rejectedMaxCVars[name] then
+        local nv, nf = tonumber(value), tonumber(fallback)
+        if nv and nf and nv > nf then
+            return fallback
+        end
+    end
+    return value
+end
+
 function NS.SetCVarIfChanged(name, value)
     if value == nil or IsSecret(value) or missingCVars[name] then
         return false
     end
+    value = ResolveTargetValue(name, value)
     local current, status = CVarGet(name)
     if InCombat() then
         if status ~= "ok" or not ValuesMatch(current, value) then
@@ -189,23 +221,87 @@ function NS.SetCVarIfChanged(name, value)
     if ValuesMatch(current, value) then
         return false
     end
-    return CVarSet(name, value)
+    local wrote = CVarSet(name, value)
+    -- Forever 1.60.1 rejects out-of-bounds CVar values and keeps the old value.
+    -- Read back the live value; if the engine refused a higher value, apply the Forever ceiling.
+    local fallback = NS.FALLBACK_CVARS and NS.FALLBACK_CVARS[name]
+    if fallback ~= nil and not ValuesMatch(value, fallback) then
+        local nv, nf = tonumber(value), tonumber(fallback)
+        if nv and nf and nv > nf then
+            local after, afterStatus = CVarGet(name)
+            if afterStatus == "ok" and not ValuesMatch(after, value) then
+                rejectedMaxCVars[name] = true
+                if not ValuesMatch(after, fallback) then
+                    wrote = CVarSet(name, fallback) or wrote
+                end
+            end
+        end
+    end
+    return wrote
 end
 
-function NS.ForceCVarNow(name, value)
-    if value == nil or IsSecret(value) or missingCVars[name] then
-        return false
+function NS.GetCVarNumber(name, fallback)
+    if NS.db and NS.db.profile == "custom" and type(NS.db.customCVars) == "table" and NS.db.customCVars[name] ~= nil then
+        local saved = tonumber(NS.db.customCVars[name])
+        if saved then
+            return saved
+        end
     end
-    if InCombat() then
-        pendingApply = true
-        return false
+    local val, status = CVarGet(name)
+    if status == "ok" then
+        local n = tonumber(val)
+        if n and not IsSecret(n) then
+            return n
+        end
     end
-    local _, status = CVarGet(name)
-    if status == "missing" and not CVarExists(name) then
-        missingCVars[name] = true
-        return false
+    local base = (NS.db and (NS.MENU_GRAPHICS[NS.db.profile] or NS.MENU_GRAPHICS[NS.db.baseProfile])) or NS.MENU_GRAPHICS.ultimate
+    if base and base[name] ~= nil then
+        return tonumber(base[name]) or fallback
     end
-    return CVarSet(name, value)
+    return fallback
+end
+
+function NS.SetCustomCVar(name, value, raidName)
+    if not NS.db then
+        NS.InitDB()
+    end
+    if not NS.db then
+        return
+    end
+    local n = tonumber(value)
+    if n == nil then
+        return
+    end
+    NS.SnapshotPresetToCustom()
+    NS.db.customCVars = NS.db.customCVars or {}
+    NS.db.customCVars[name] = n
+    if raidName then
+        NS.db.customCVars[raidName] = n
+    end
+    if NS.db.enabled then
+        NS.SetCVarIfChanged(name, n)
+        if raidName then
+            NS.SetCVarIfChanged(raidName, n)
+        end
+    end
+    NS.RefreshOptions()
+end
+
+function NS.ApplyCustomCVars()
+    local db = NS.db
+    if not db or db.profile ~= "custom" or type(db.customCVars) ~= "table" then
+        return
+    end
+    -- Never let saved custom CVars re-enable bloom / glow that SAFE_LIGHTING_RESET
+    -- is meant to kill (Mount Hyjal outdoor clipping artifacts).
+    local lighting = NS.SAFE_LIGHTING_RESET
+    for name, val in pairs(db.customCVars) do
+        if lighting and lighting[name] ~= nil then
+            db.customCVars[name] = nil
+        else
+            NS.SetCVarIfChanged(name, val)
+        end
+    end
 end
 
 local bundlePlan = {}
@@ -259,7 +355,7 @@ end
 
 function NS.ApplyGraphicsQuality(profile)
     local quality = NS.PROFILE_QUALITY[profile]
-    if not quality then
+    if quality == nil then
         return false
     end
     local wrote = false
@@ -323,7 +419,6 @@ function NS.ApplyGathering()
 end
 
 local outlineTicker
-local outlineStep = 0
 local outlineQuiet = 0
 local outlineNames = {}
 for name in pairs(OUTLINE_OFF) do
@@ -335,19 +430,13 @@ local function StopOutlineTicker()
         outlineTicker:Cancel()
         outlineTicker = nil
     end
-    outlineStep = 0
 end
 
-local function StartOutlineTicker(step)
-    if outlineTicker and outlineStep == step then
+local function StartOutlineTicker()
+    if outlineTicker or not (C_Timer and C_Timer.NewTicker) then
         return
     end
-    StopOutlineTicker()
-    if not (C_Timer and C_Timer.NewTicker) then
-        return
-    end
-    outlineStep = step
-    outlineTicker = C_Timer.NewTicker(step, function()
+    outlineTicker = C_Timer.NewTicker(OUTLINE_FAST, function()
         NS.PulseOutline()
     end)
 end
@@ -388,13 +477,10 @@ function NS.PulseOutline()
     end
     if busy then
         outlineQuiet = 0
-        if outlineStep ~= OUTLINE_FAST then
-            StartOutlineTicker(OUTLINE_FAST)
-        end
     else
         outlineQuiet = outlineQuiet + 1
-        if outlineQuiet >= 4 and outlineStep ~= OUTLINE_SLOW then
-            StartOutlineTicker(OUTLINE_SLOW)
+        if outlineQuiet >= 4 then
+            StopOutlineTicker()
         end
     end
 end
@@ -406,10 +492,13 @@ function NS.SyncOutlineSuppressor()
     local want = db and db.enabled and not db.questItemSparkles
     if want then
         outlineQuiet = 0
-        StartOutlineTicker(OUTLINE_FAST)
+        StartOutlineTicker()
         NS.PulseOutline()
     else
         StopOutlineTicker()
+    end
+    if NS.SyncProtectWatch then
+        NS.SyncProtectWatch()
     end
 end
 
@@ -438,7 +527,8 @@ function NS.ApplyFeature(def)
     end
     local intensity = NS.GetFeatureIntensity(def.key)
     if intensity == "off" then
-        return NS.ApplyCVarBundle(def.off)
+        local offBundle = (NS.GetFeatureOffBundle and NS.GetFeatureOffBundle(def)) or def.off
+        return NS.ApplyCVarBundle(offBundle)
     end
     return NS.ApplyCVarBundle(def[intensity] or def.ultimate)
 end
@@ -454,6 +544,95 @@ function NS.ApplyAllFeatures()
     return wroteSlider
 end
 
+local tintLayer
+local tintTexture
+
+function NS.ApplyTint()
+    local db = NS.db
+    local tints = NS.TINTS
+    local tintIndex = db and tonumber(db.tint) or 0
+    local strength = db and tonumber(db.tintStrength) or 0
+    local entry = (db and db.enabled and tints and tintIndex > 0 and strength > 0) and tints[tintIndex] or nil
+    local color = entry and entry.color or nil
+    if not color then
+        if tintLayer then
+            tintLayer:Hide()
+        end
+        return
+    end
+    if not tintLayer then
+        local parent = WorldFrame or UIParent
+        tintLayer = CreateFrame("Frame", nil, parent)
+        tintLayer:SetAllPoints()
+        tintLayer:SetFrameStrata("BACKGROUND")
+        tintTexture = tintLayer:CreateTexture(nil, "BACKGROUND")
+        tintTexture:SetAllPoints()
+        tintTexture:SetBlendMode("MOD")
+    end
+    local factor = math.max(0, math.min(1, strength / 100))
+    local r = 1 - factor * (1 - color[1])
+    local g = 1 - factor * (1 - color[2])
+    local b = 1 - factor * (1 - color[3])
+    tintTexture:SetColorTexture(r, g, b, 1)
+    tintLayer:Show()
+end
+
+function NS.SetTint(tintIndex, silent)
+    if not NS.db then
+        NS.InitDB()
+    end
+    if not NS.db then
+        return
+    end
+    local idx = math.floor((tonumber(tintIndex) or 0) + 0.5)
+    local tints = NS.TINTS or {}
+    if idx < 0 or idx > #tints then
+        idx = 0
+    end
+    NS.db.tint = idx
+    if idx > 0 and (tonumber(NS.db.tintStrength) or 0) <= 0 then
+        NS.db.tintStrength = 50
+    end
+    NS.ApplyTint()
+    NS.RefreshOptions()
+    if not silent then
+        if idx == 0 then
+            NS.Print("Color tint disabled (default).")
+        else
+            NS.Print("Color tint: " .. (tints[idx] and tints[idx].name or tostring(idx)) .. " (" .. tostring(NS.db.tintStrength or 50) .. "%)")
+        end
+    end
+end
+
+function NS.SetTintStrength(strength)
+    if not NS.db then
+        NS.InitDB()
+    end
+    if not NS.db then
+        return
+    end
+    local n = math.floor(((tonumber(strength) or 0) / 5) + 0.5) * 5
+    NS.db.tintStrength = math.max(0, math.min(100, n))
+    NS.ApplyTint()
+    NS.RefreshOptions()
+end
+
+function NS.ResetTint(silent)
+    if not NS.db then
+        NS.InitDB()
+    end
+    if not NS.db then
+        return
+    end
+    NS.db.tint = 0
+    NS.db.tintStrength = 50
+    NS.ApplyTint()
+    NS.RefreshOptions()
+    if not silent then
+        NS.Print("Color tint reset to default (None).")
+    end
+end
+
 local function CancelReapplyTimer()
     if reapplyTimer then
         reapplyTimer:Cancel()
@@ -461,10 +640,23 @@ local function CancelReapplyTimer()
     end
 end
 
+local function CancelSettleTimer()
+    if settleTimer then
+        settleTimer:Cancel()
+        settleTimer = nil
+    end
+end
+
 function NS.ApplyAll(full)
     local db = NS.db
     if not db or not db.enabled then
         CancelReapplyTimer()
+        CancelSettleTimer()
+        -- Clear bloom/glow left behind so outdoor clipping does not persist after disable.
+        if not InCombat() and NS.SAFE_LIGHTING_RESET then
+            NS.ApplyCVarBundle(NS.SAFE_LIGHTING_RESET)
+        end
+        NS.ApplyTint()
         NS.SyncOutlineSuppressor()
         NS.ApplySoftTargetCVars()
         if NS.Sparkles and NS.Sparkles.Refresh then
@@ -472,29 +664,31 @@ function NS.ApplyAll(full)
         end
         return false
     end
+    NS.ApplyTint()
     if InCombat() then
         pendingApply = true
         return false
     end
     local profile = db.profile
-    if profile ~= "defaults" and profile ~= "balance" and profile ~= "ultimate" and profile ~= "custom" then
+    if not (NS.VALID_PROFILES and NS.VALID_PROFILES[profile]) then
         profile = "ultimate"
         db.profile = profile
     end
     local base = db.baseProfile
-    if base ~= "defaults" and base ~= "balance" and base ~= "ultimate" then
-        base = (profile ~= "custom") and profile or "ultimate"
+    if not (NS.VALID_BASE_PROFILES and NS.VALID_BASE_PROFILES[base]) then
+        base = (profile ~= "custom" and NS.VALID_BASE_PROFILES and NS.VALID_BASE_PROFILES[profile]) and profile or "ultimate"
         db.baseProfile = base
     end
     local useFeatureBundles = (profile == "custom" or profile == "defaults")
     -- Quality first. Writing it or menu sliders can reset raw CVars a moment later, so reapply.
     local wroteMaster = false
     if profile ~= "custom" or full then
-        if NS.ApplyGraphicsQuality(base) then
+        local targetProfile = (profile ~= "custom") and profile or base
+        if NS.ApplyGraphicsQuality(targetProfile) then
             wroteMaster = true
         end
         -- Skip feature-owned CVars when ApplyAllFeatures is about to write their final values.
-        if NS.ApplyMenuGraphics(base, useFeatureBundles) then
+        if NS.ApplyMenuGraphics(targetProfile, useFeatureBundles) then
             wroteMaster = true
         end
     end
@@ -504,7 +698,13 @@ function NS.ApplyAll(full)
         if NS.ApplyAllFeatures() then
             wroteMaster = true
         end
+        NS.ApplyCustomCVars()
     end
+    if NS.SAFE_LIGHTING_RESET then
+        NS.ApplyCVarBundle(NS.SAFE_LIGHTING_RESET)
+    end
+    -- Bloom multipliers stay at 0 via SAFE_LIGHTING_RESET. Feature bundles already
+    -- write the user's sunShafts intensity — do not force the checkbox off here.
     NS.ApplySparkleCVars()
     NS.ApplySoftTargetCVars()
     if NS.Sparkles and NS.Sparkles.Refresh then
@@ -535,7 +735,34 @@ local function ScheduleReapply()
     reapplyTimer = C_Timer.NewTimer(0.4, Fire)
 end
 
-function NS.ApplySettings(silent)
+-- Forever continues loading server/default CVars up to ~4 seconds after login.
+-- Schedule a final settle pass at 4.35s so the client does not undo raw CVars.
+local function ScheduleLoginSettle()
+    CancelSettleTimer()
+    if not (C_Timer and C_Timer.NewTimer) then
+        return
+    end
+    settleTimer = C_Timer.NewTimer(LOGIN_SETTLE_SECONDS, function()
+        settleTimer = nil
+        if NS.db and NS.db.enabled then
+            if NS.ApplyAll(true) then
+                ScheduleReapply()
+            end
+            if NS.Options and NS.Options.Refresh then
+                NS.Options.Refresh()
+            end
+        end
+    end)
+end
+
+function NS.ApplySettings(a, b)
+    local silent = a
+    if a == NS then
+        silent = b
+        if NS.InitDB then
+            NS.InitDB()
+        end
+    end
     if NS.ApplyAll(true) then
         ScheduleReapply()
     end
@@ -552,7 +779,12 @@ function NS.SnapshotPresetToCustom()
     if not db or db.profile == "custom" then
         return
     end
-    local fallback = (db.baseProfile == "balance" or db.profile == "balance") and "balance" or "ultimate"
+    local fallback = "ultimate"
+    if db.baseProfile == "balance" or db.profile == "balance" then
+        fallback = "balance"
+    elseif db.baseProfile == "low" or db.profile == "low" then
+        fallback = "low"
+    end
     local list = NS.FEATURES
     for i = 1, #list do
         local k = list[i].key
@@ -568,18 +800,31 @@ function NS.ApplySingleFeature(key)
     if not feature then
         return
     end
+    if NS.db and type(NS.db.customCVars) == "table" and feature.ultimate then
+        for name in pairs(feature.ultimate) do
+            NS.db.customCVars[name] = nil
+        end
+    end
     if not initialApplyDone or pendingApply then
         NS.ApplySettings(true)
         return
     end
     if NS.db and NS.db.enabled then
-        if NS.ApplyFeature(feature) and C_Timer and C_Timer.After then
-            -- Re-assert raw CVars after the engine's slider callback settles.
-            C_Timer.After(0.2, function()
-                if NS.db and NS.db.enabled and not InCombat() then
-                    NS.ApplyFeature(feature)
-                end
-            end)
+        if NS.ApplyFeature(feature) then
+            if NS.SAFE_LIGHTING_RESET then
+                NS.ApplyCVarBundle(NS.SAFE_LIGHTING_RESET)
+            end
+            if C_Timer and C_Timer.After then
+                -- Re-assert raw CVars after the engine's slider callback settles.
+                C_Timer.After(0.2, function()
+                    if NS.db and NS.db.enabled and not InCombat() then
+                        NS.ApplyFeature(feature)
+                        if NS.SAFE_LIGHTING_RESET then
+                            NS.ApplyCVarBundle(NS.SAFE_LIGHTING_RESET)
+                        end
+                    end
+                end)
+            end
         end
     end
     if NS.Options and NS.Options.Refresh then
@@ -588,23 +833,49 @@ function NS.ApplySingleFeature(key)
 end
 
 function NS.SetProfile(profile, silent)
-    if profile ~= "defaults" and profile ~= "balance" and profile ~= "ultimate" then
+    if not (NS.VALID_BASE_PROFILES and NS.VALID_BASE_PROFILES[profile]) then
         profile = "ultimate"
     end
     NS.db.profile = profile
     NS.db.baseProfile = profile
     NS.db.enabled = true
+    NS.db.customCVars = {}
+    if profile == "defaults" or profile == "potato" then
+        NS.db.tint = 0
+    end
     local hadInteractIcons = NS.db.showSoftTargetInteractIcons
     NS.db.showSoftTargetInteractIcons = false
     local list = NS.FEATURES
     for i = 1, #list do
         local key = list[i].key
-        if profile == "defaults" then
+        if NS.ALWAYS_MAX_FEATURES and NS.ALWAYS_MAX_FEATURES[key] then
+            NS.db[key] = true
+            NS.db.intensity[key] = "ultimate"
+        elseif profile == "potato" then
+            NS.db[key] = false
+            NS.db.intensity[key] = "off"
+        elseif profile == "defaults" then
             NS.db[key] = key == "projectedTextures"
             NS.db.intensity[key] = "ultimate"
+        elseif profile == "low" then
+            if key == "projectedTextures" then
+                NS.db[key] = true
+                NS.db.intensity[key] = "ultimate"
+            elseif NS.LOW_OFF_FEATURES and NS.LOW_OFF_FEATURES[key] then
+                NS.db[key] = false
+                NS.db.intensity[key] = "off"
+            else
+                NS.db[key] = true
+                NS.db.intensity[key] = "low"
+            end
         else
-            NS.db[key] = true
-            NS.db.intensity[key] = profile
+            if key == "volumeFog" or key == "sunShafts" then
+                NS.db[key] = false
+                NS.db.intensity[key] = "off"
+            else
+                NS.db[key] = true
+                NS.db.intensity[key] = profile
+            end
         end
     end
     if NS.ApplyAll(true) then
@@ -622,6 +893,13 @@ function NS.SetProfile(profile, silent)
     end
 end
 
+function NS.RestartGraphics()
+    if ConsoleExec then
+        pcall(ConsoleExec, "gxRestart")
+        NS.Print("Graphics engine restarted.")
+    end
+end
+
 function NS.ToggleEnabled()
     NS.db.enabled = not NS.db.enabled
     NS.SyncProtectWatch()
@@ -634,10 +912,15 @@ function NS.ToggleEnabled()
     else
         pendingApply = false
         CancelReapplyTimer()
+        CancelSettleTimer()
+        if not InCombat() and NS.SAFE_LIGHTING_RESET then
+            NS.ApplyCVarBundle(NS.SAFE_LIGHTING_RESET)
+        end
+        NS.ApplyTint()
         if NS.Sparkles and NS.Sparkles.Refresh then
             NS.Sparkles.Refresh()
         end
-        NS.Print("Off. Game graphics stay as they are.")
+        NS.Print("Off. Bloom/glow reset; other graphics stay as last applied.")
     end
     if NS.Options and NS.Options.Refresh then
         NS.Options.Refresh()
@@ -663,7 +946,13 @@ function NS.ToggleFeature(key, enabled)
         NS.SnapshotPresetToCustom()
         NS.db[key] = checked
         if checked and (not NS.db.intensity[key] or NS.db.intensity[key] == "off") then
-            NS.db.intensity[key] = (NS.db.baseProfile == "balance") and "balance" or "ultimate"
+            if NS.db.baseProfile == "balance" then
+                NS.db.intensity[key] = "balance"
+            elseif NS.db.baseProfile == "low" then
+                NS.db.intensity[key] = "low"
+            else
+                NS.db.intensity[key] = "ultimate"
+            end
         elseif not checked then
             NS.db.intensity[key] = "off"
         end
@@ -680,6 +969,8 @@ function NS.ToggleFeature(key, enabled)
             else
                 pendingApply = false
                 CancelReapplyTimer()
+                CancelSettleTimer()
+                NS.ApplyTint()
                 if NS.Sparkles and NS.Sparkles.Refresh then
                     NS.Sparkles.Refresh()
                 end
@@ -711,35 +1002,8 @@ function NS.ToggleFeature(key, enabled)
     end
 end
 
-function NS.CycleFeatureIntensity(key, direction)
-    local feature = NS.FEATURE_BY_KEY[key]
-    if not feature then
-        return
-    end
-    local cur = NS.GetFeatureIntensity(key)
-    local idx = 1
-    for i = 1, #INTENSITY_ORDER do
-        if INTENSITY_ORDER[i] == cur then
-            idx = i
-            break
-        end
-    end
-    idx = idx + (direction or 1)
-    if idx < 1 then
-        idx = #INTENSITY_ORDER
-    elseif idx > #INTENSITY_ORDER then
-        idx = 1
-    end
-    local nextIntensity = INTENSITY_ORDER[idx]
-    NS.SnapshotPresetToCustom()
-    NS.db.intensity[key] = nextIntensity
-    NS.db[key] = nextIntensity ~= "off"
-    NS.ApplySingleFeature(key)
-    return nextIntensity
-end
-
 function NS.CaptureReloadBaseline()
-    NS.reloadBaseline = {}
+    NS.reloadBaseline = NS.reloadBaseline or {}
     if not NS.db or not NS.RELOAD_OPTIONS then
         return
     end
@@ -765,16 +1029,23 @@ function NS.SyncReloadFlag()
     reloadPending = pending
 end
 
+local reloadParts = {}
+local reloadLines = {}
+
 local function ReloadSignature()
     if not NS.db or not NS.RELOAD_OPTIONS then
         return ""
     end
-    local parts = {}
+    local count = 0
     for key in pairs(NS.RELOAD_OPTIONS) do
-        parts[#parts + 1] = key .. "=" .. (NS.db[key] and "1" or "0")
+        count = count + 1
+        reloadParts[count] = key .. "=" .. (NS.db[key] and "1" or "0")
     end
-    table.sort(parts)
-    return table.concat(parts, "|")
+    for i = count + 1, #reloadParts do
+        reloadParts[i] = nil
+    end
+    table.sort(reloadParts)
+    return table.concat(reloadParts, "|")
 end
 
 function NS.PromptReload()
@@ -791,18 +1062,22 @@ function NS.PromptReload()
     if not dialogInfo or not StaticPopup_Show then
         return
     end
-    local lines = {}
+    local count = 0
     local baseline = NS.reloadBaseline or {}
     for key, label in pairs(NS.RELOAD_OPTIONS) do
         local now = NS.db[key] and true or false
         if now ~= baseline[key] then
-            lines[#lines + 1] = label .. " (" .. (now and "on" or "off") .. ")"
+            count = count + 1
+            reloadLines[count] = label .. " (" .. (now and "on" or "off") .. ")"
         end
     end
-    table.sort(lines)
+    for i = count + 1, #reloadLines do
+        reloadLines[i] = nil
+    end
+    table.sort(reloadLines)
     local body = "A UI reload is required before this change finishes."
-    if #lines > 0 then
-        body = body .. "\n\n" .. table.concat(lines, "\n")
+    if count > 0 then
+        body = body .. "\n\n" .. table.concat(reloadLines, "\n")
     end
     body = body .. "\n\nReload now?"
     dialogInfo.text = body
@@ -820,12 +1095,6 @@ function NS.PromptReload()
         return
     end
     StaticPopup_Show("XIUSMAXGRAPHICS_RELOAD")
-end
-
-function NS.ToggleOptions()
-    if NS.Options and NS.Options.Toggle then
-        NS.Options.Toggle()
-    end
 end
 
 function NS.RefreshOptions()
@@ -856,6 +1125,8 @@ SlashCmdList.XIUSMAXGRAPHICS = function(msg)
         NS.db.enabled = false
         pendingApply = false
         CancelReapplyTimer()
+        CancelSettleTimer()
+        NS.ApplyTint()
         NS.SyncProtectWatch()
         NS.SyncOutlineSuppressor()
         if NS.Sparkles and NS.Sparkles.Refresh then
@@ -869,6 +1140,32 @@ SlashCmdList.XIUSMAXGRAPHICS = function(msg)
         NS.SetProfile("balance")
     elseif msg == "defaults" or msg == "default" or msg == "reset" then
         NS.SetProfile("defaults")
+    elseif msg == "low" then
+        NS.SetProfile("low")
+    elseif msg == "potato" or msg == "min" then
+        NS.SetProfile("potato")
+    elseif msg == "restart" or msg == "gxrestart" then
+        NS.RestartGraphics()
+    elseif string.sub(msg, 1, 4) == "tint" then
+        local arg = strtrim(string.sub(msg, 5))
+        if arg == "" or arg == "off" or arg == "none" or arg == "default" or arg == "reset" or arg == "0" then
+            NS.ResetTint()
+        else
+            local found = tonumber(arg)
+            if not found and NS.TINTS then
+                for i = 1, #NS.TINTS do
+                    if string.lower(NS.TINTS[i].name) == arg then
+                        found = i
+                        break
+                    end
+                end
+            end
+            if found then
+                NS.SetTint(found)
+            else
+                NS.Print("Tint options: off, sepia, warm, cold, night, emerald, dusk.")
+            end
+        end
     elseif msg == "protect" then
         NS.db.protect = not NS.db.protect
         NS.SyncProtectWatch()
@@ -876,6 +1173,14 @@ SlashCmdList.XIUSMAXGRAPHICS = function(msg)
         NS.RefreshOptions()
     elseif msg == "sparkles" or msg == "loot" then
         NS.ToggleFeature("questItemSparkles", not NS.db.questItemSparkles)
+    elseif msg == "general" then
+        NS.OpenGraphicsOptions("general")
+    elseif msg == "world" or msg == "terrain" then
+        NS.OpenGraphicsOptions("world")
+    elseif msg == "lighting" or msg == "effects" or msg == "shadows" then
+        NS.OpenGraphicsOptions("lighting")
+    elseif msg == "camera" then
+        NS.OpenGraphicsOptions("camera")
     else
         local Lib = _G.XiusCoreSettingsLib
         if Lib and type(Lib.Toggle) == "function" then
@@ -911,7 +1216,7 @@ function XiusMaxGraphics_OnAddonCompartmentClick(_, buttonName)
     end
     if NS.OpenGraphicsOptions then
         NS.OpenGraphicsOptions()
-    else
+    elseif NS.ToggleOptions then
         NS.ToggleOptions()
     end
 end
@@ -940,11 +1245,13 @@ end
 local events = CreateFrame("Frame")
 SafeRegister(events, "ADDON_LOADED")
 SafeRegister(events, "PLAYER_LOGIN")
+SafeRegister(events, "VARIABLES_LOADED")
 SafeRegister(events, "PLAYER_ENTERING_WORLD")
 SafeRegister(events, "PLAYER_REGEN_ENABLED")
 
 function NS.SyncProtectWatch()
-    if NS.db and NS.db.enabled and NS.db.protect then
+    local db = NS.db
+    if db and db.enabled and (db.protect or not db.questItemSparkles) then
         SafeRegister(events, "CVAR_UPDATE")
     else
         SafeUnregister(events, "CVAR_UPDATE")
@@ -966,7 +1273,14 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             NS.Options.RegisterSettings()
         end
         NS.CaptureReloadBaseline()
+        ScheduleLoginSettle()
         NS.Print("Loaded v" .. NS.VERSION .. ". Type |cffffd100/xmg|r for options.")
+    elseif event == "VARIABLES_LOADED" then
+        if NS.db and NS.db.enabled then
+            if NS.ApplyAll(true) then
+                ScheduleReapply()
+            end
+        end
     elseif event == "PLAYER_ENTERING_WORLD" then
         local isInitialLogin = not IsSecret(arg1) and arg1
         local isReloadingUi = not IsSecret(arg2) and arg2
@@ -974,6 +1288,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             if NS.ApplyAll(true) then
                 ScheduleReapply()
             end
+            ScheduleLoginSettle()
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if pendingApply then
@@ -986,22 +1301,32 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             NS.Sparkles.OnCombatEnd()
         end
     elseif event == "CVAR_UPDATE" then
-        if not NS.db or not NS.db.enabled or not NS.db.protect then
+        local db = NS.db
+        if not db or not db.enabled or applyingProtect then
             return
         end
         if IsSecret(arg1) or type(arg1) ~= "string" then
             return
         end
-        if applyingProtect or not (PROTECT_WATCH[arg1] or PROTECT_WATCH[string.lower(arg1)]) then
-            return
+        local lower = string.lower(arg1)
+        local isOutline = OUTLINE_WATCH[arg1] or OUTLINE_WATCH[lower]
+        if db.protect and (PROTECT_WATCH[arg1] or PROTECT_WATCH[lower]) then
+            if InCombat() then
+                pendingApply = true
+                return
+            end
+            applyingProtect = true
+            NS.ApplySparkleCVars()
+            NS.ApplySoftTargetIcons()
+            applyingProtect = false
+        elseif not db.questItemSparkles and isOutline then
+            if InCombat() then
+                pendingApply = true
+                return
+            end
+            applyingProtect = true
+            NS.SyncOutlineSuppressor()
+            applyingProtect = false
         end
-        if InCombat() then
-            pendingApply = true
-            return
-        end
-        applyingProtect = true
-        NS.ApplySparkleCVars()
-        NS.ApplySoftTargetIcons()
-        applyingProtect = false
     end
 end)

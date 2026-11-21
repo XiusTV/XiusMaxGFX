@@ -1,11 +1,7 @@
---[[
-    Xius Max Graphics - Sparkles.lua
-    Soft-target glints for herbs, ore, and optional quest objects.
-]]
+local addonName, ns = ...
+local NS = ns
 
-local ADDON, NS = ...
-
-local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+local XiusCore = _G.XiusCore or _G.XiusCoreSettingsLib
 if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
     local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
     XiusCore = ok and loaded and true or false
@@ -81,15 +77,41 @@ local function IsSecret(value)
     if NS.CanRead then
         return not NS.CanRead(value)
     end
-    return issecretvalue ~= nil and issecretvalue(value)
+    if issecretvalue then
+        local ok, secret = pcall(issecretvalue, value)
+        if not ok or secret then
+            return true
+        end
+    end
+    if canaccessvalue then
+        local ok, allowed = pcall(canaccessvalue, value)
+        if not ok or not allowed then
+            return true
+        end
+    end
+    return false
 end
 
 local function IsSecretTable(value)
-    return issecrettable ~= nil and issecrettable(value)
+    if type(issecrettable) ~= "function" then
+        return false
+    end
+    local ok, secret = pcall(issecrettable, value)
+    if not ok or secret then
+        return true
+    end
+    return false
 end
 
 local function InCombat()
-    return InCombatLockdown ~= nil and InCombatLockdown()
+    if type(InCombatLockdown) ~= "function" then
+        return false
+    end
+    local ok, locked = pcall(InCombatLockdown)
+    if not ok or IsSecret(locked) then
+        return true
+    end
+    return locked and true or false
 end
 
 local function SafeRegister(frame, event)
@@ -157,34 +179,37 @@ local function HasAny(text, list)
     return false
 end
 
-local tipParts = {}
-
-local function ReadTooltipLines(data)
+local function ClassifyTooltipData(data)
     local lines = data.lines
     if IsSecret(lines) or IsSecretTable(lines) or type(lines) ~= "table" then
         return nil
     end
-    local count = 0
+    local sawQuest = false
     for i = 1, #lines do
         local line = lines[i]
         if not IsSecret(line) and not IsSecretTable(line) and line then
             local left = line.leftText
             if not IsSecret(left) and type(left) == "string" and left ~= "" then
-                count = count + 1
-                tipParts[count] = strlower(left)
+                local text = strlower(left)
+                if Has(text, "herbalism") or Has(text, "herb") then
+                    return "herb"
+                end
+                if Has(text, "mining") then
+                    return "ore"
+                end
+                if Has(text, "quest") then
+                    sawQuest = true
+                end
             end
         end
     end
-    for i = count + 1, #tipParts do
-        tipParts[i] = nil
+    if sawQuest then
+        return "quest"
     end
-    if count == 0 then
-        return nil
-    end
-    return table.concat(tipParts, " ")
+    return nil
 end
 
-local function TooltipText(unit)
+local function ClassifyTooltip(unit)
     if not (C_TooltipInfo and C_TooltipInfo.GetUnit) then
         return nil
     end
@@ -192,23 +217,17 @@ local function TooltipText(unit)
     if not ok or IsSecret(data) or IsSecretTable(data) or data == nil then
         return nil
     end
-    local readOk, blob = pcall(ReadTooltipLines, data)
+    local readOk, kind = pcall(ClassifyTooltipData, data)
     if readOk then
-        return blob
+        return kind
     end
     return nil
 end
 
 local function Classify(unit)
-    local tip = TooltipText(unit)
-    if Has(tip, "herbalism") or Has(tip, "herb") then
-        return "herb"
-    end
-    if Has(tip, "mining") then
-        return "ore"
-    end
-    if Has(tip, "quest") then
-        return "quest"
+    local tipKind = ClassifyTooltip(unit)
+    if tipKind then
+        return tipKind
     end
 
     local name = SafeString(UnitName, unit)
@@ -309,25 +328,26 @@ local function EnsureHolder()
 end
 
 local function GlintOnUpdate(self, elapsed)
-    if IsSecret(elapsed) then
+    if not self:IsVisible() or IsSecret(elapsed) then
         return
     end
     accum = accum + (elapsed or 0)
     if accum < STEP then
         return
     end
-    accum = 0
+    -- Keep leftover time so a long frame does not hitch the sparkle cadence.
+    accum = accum - STEP
+    if accum > STEP then
+        accum = STEP
+    end
     local t = GetTime()
-    if IsSecret(t) then
+    if not t or IsSecret(t) then
         return
     end
     for i = 1, NUM_GLINTS do
         local g = glints[i]
         local angle = g.angle + t * g.speed
         local pulse = 0.7 + 0.3 * sin(t * 6 + g.angle)
-        if IsSecret(angle) or IsSecret(pulse) then
-            return
-        end
         g:SetPoint("CENTER", self, "CENTER", cos(angle) * g.radius, sin(angle) * g.radius * pulse)
         g:SetAlpha(0.4 + 0.6 * pulse)
     end
@@ -340,7 +360,12 @@ local function SetColor(mode)
     colorMode = mode
     local r, g, b, a
     if mode == 1 then
-        r, g, b, a = NS.COLOR.sparkle[1], NS.COLOR.sparkle[2], NS.COLOR.sparkle[3], 1
+        local c = NS.COLOR and NS.COLOR.sparkle
+        if c then
+            r, g, b, a = c[1], c[2], c[3], 1
+        else
+            r, g, b, a = 1.0, 0.88, 0.35, 1
+        end
     elseif mode == 2 then
         r, g, b, a = 0.75, 0.65, 0.25, 0.55
     else
@@ -356,11 +381,11 @@ local function ReleaseHolder()
         return
     end
     holder:SetScript("OnUpdate", nil)
+    holder:Hide()
     if InCombat() then
         pendingReparent = true
         return
     end
-    holder:Hide()
     pcall(holder.ClearAllPoints, holder)
     pcall(holder.SetParent, holder, UIParent)
     pendingReparent = false
@@ -409,7 +434,15 @@ local function DropNameplateCVar()
     raisedNameplate = false
 end
 
+local function StopTicker()
+    if ticker then
+        ticker:Cancel()
+        ticker = nil
+    end
+end
+
 local function Hide()
+    StopTicker()
     if not shown and not pendingReparent and not raisedNameplate then
         return
     end
@@ -446,14 +479,16 @@ local function Show()
     holder:Show()
 end
 
-local function StopTicker()
-    if ticker then
-        ticker:Cancel()
-        ticker = nil
+local Evaluate
+
+local function EnsureTicker()
+    if ticker or not lastAllowed or not Wanted() or not (C_Timer and C_Timer.NewTicker) then
+        return
     end
+    ticker = C_Timer.NewTicker(1, Evaluate)
 end
 
-local function Evaluate()
+Evaluate = function()
     if pendingReparent and not InCombat() then
         ReleaseHolder()
     end
@@ -461,7 +496,6 @@ local function Evaluate()
         lastGuid = nil
         lastAllowed = false
         Hide()
-        StopTicker()
         return
     end
     if InCombat() then
@@ -485,6 +519,7 @@ local function Evaluate()
 
     if guid == lastGuid then
         if not lastAllowed then
+            StopTicker()
             return
         end
         if shown then
@@ -497,6 +532,7 @@ local function Evaluate()
         else
             Show()
         end
+        EnsureTicker()
         return
     end
 
@@ -504,16 +540,10 @@ local function Evaluate()
     lastAllowed = KindAllowed(Classify("softinteract"))
     if lastAllowed then
         Show()
+        EnsureTicker()
     else
         Hide()
     end
-end
-
-local function EnsureTicker()
-    if ticker or not Wanted() or not (C_Timer and C_Timer.NewTicker) then
-        return
-    end
-    ticker = C_Timer.NewTicker(2, Evaluate)
 end
 
 local events = CreateFrame("Frame")
@@ -539,13 +569,11 @@ function sparkles.Refresh()
     lastGuid = nil
     lastAllowed = false
     SyncEvents()
-    EnsureTicker()
     Evaluate()
 end
 
 function sparkles.OnCombatEnd()
     SyncEvents()
-    EnsureTicker()
     Evaluate()
 end
 
@@ -553,7 +581,6 @@ events:SetScript("OnEvent", function(_, event, arg1)
     if event == "PLAYER_ENTERING_WORLD" then
         lastGuid = nil
         lastAllowed = false
-        EnsureTicker()
     elseif event == "PLAYER_REGEN_DISABLED" then
         Hide()
         return

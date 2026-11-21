@@ -1,0 +1,23 @@
+## Interface: 16001
+## Title: |cffd4a85aXius|r |cff5fd3f0Max Graphics|r
+## Notes: Pick-and-choose graphics upgrades and loot sparkles for World of Warcraft Forever. Type /xmg
+## Author: Xius
+## Version: 1.7.0
+## SavedVariables: XiusMaxGraphicsDB
+## LoadSavedVariablesFirst: 1
+## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
+## X-Website: https://github.com/XiusTV/xiusmaxgfx
+## AddonCompartmentFunc: XiusMaxGraphics_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: XiusMaxGraphics_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: XiusMaxGraphics_OnAddonCompartmentLeave
+## Category: User Interface
+## Group: XiusCore
+## Dependencies: XiusCore
+## RequiredDeps: XiusCore
+## X-Part-Of: XiusCore
+## AllowLoadGameType: forever, camelot
+
+Config.lua
+Core.lua
+Sparkles.lua
+Libs/SettingsGlue.lua
